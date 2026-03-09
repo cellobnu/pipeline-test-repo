@@ -1,0 +1,69 @@
+name: Deploy to VPS
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: self-hosted
+
+    steps:
+      - name: Deploy application
+        shell: bash
+        run: |
+          set -e
+
+          REPO="${{ github.event.repository.name }}"
+          REPO_URL="${{ github.server_url }}/${{ github.repository }}.git"
+          DEPLOY_PATH="/home/adm_abacom/apps/$REPO"
+
+          echo "[Deploy] Repository: $REPO"
+          echo "[Deploy] Target path: $DEPLOY_PATH"
+
+          # First deploy: clone the repository
+          if [ ! -d "$DEPLOY_PATH" ]; then
+            echo "[Deploy] First deploy — cloning repository"
+            mkdir -p /home/adm_abacom/apps
+            git clone "$REPO_URL" "$DEPLOY_PATH"
+          else
+            echo "[Deploy] Updating existing deployment"
+            cd "$DEPLOY_PATH"
+            git pull origin main
+          fi
+
+          cd "$DEPLOY_PATH"
+
+          # Deploy strategy: docker-compose takes priority over plain Dockerfile
+          if [ -f "docker-compose.yml" ] || [ -f "docker-compose.yaml" ]; then
+            echo "[Deploy] Strategy: docker-compose"
+            docker-compose up -d --build
+          elif [ -f "Dockerfile" ]; then
+            echo "[Deploy] Strategy: docker run"
+            docker build -t "$REPO" .
+            docker stop "$REPO" 2>/dev/null || true
+            docker rm "$REPO" 2>/dev/null || true
+            docker run -d \
+              --name "$REPO" \
+              --restart unless-stopped \
+              --network infra_backend-network \
+              "$REPO"
+          else
+            echo "[Deploy] ERROR: No docker-compose.yml or Dockerfile found in $DEPLOY_PATH"
+            exit 1
+          fi
+
+          echo "[Deploy] Deployment complete"
+
+          # Optional health check (non-blocking)
+          if [ -f ".env" ]; then
+            APP_PORT=$(grep '^PORT=' .env | cut -d'=' -f2 | head -1)
+          fi
+          if [ -n "$APP_PORT" ]; then
+            sleep 3
+            if curl -sf "http://localhost:${APP_PORT}/health" > /dev/null 2>&1; then
+              echo "[Deploy] Health check passed on port $APP_PORT"
+            else
+              echo "[Deploy] Health check skipped (endpoint not available)"
+            fi
+          fi
